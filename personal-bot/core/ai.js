@@ -30,7 +30,12 @@ Examples:
 {"action":"planner.list","data":{"status":"todo"}}
 {"action":"finance.summary","data":{"month":"2025-03"}}
 
-For conversational messages, questions, or when you need more info, respond in plain text only.
+For conversational messages, questions, or when you need more info, respond using Telegram HTML formatting:
+- Use <b>bold</b> for labels, titles, and important values
+- Use <i>italic</i> for hints, dates, or secondary info
+- Use <code>inline code</code> for passwords, tokens, and exact values
+- Use <pre>code block</pre> for multi-line code
+- Keep replies concise and structured. Never use markdown asterisks or underscores.
 Be concise, direct, and helpful. Never share data with anyone other than the owner.`;
 
 export async function chat(sessionId, userMessage) {

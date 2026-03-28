@@ -23,31 +23,100 @@ function isOwner(ctx) {
   return ctx.from?.id === OWNER_ID;
 }
 
+function esc(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+// Keeps the typing indicator alive for the duration of an async operation
+async function withTyping(ctx, fn) {
+  const chatId = ctx.chat.id;
+  await ctx.telegram.sendChatAction(chatId, 'typing').catch(() => {});
+  const interval = setInterval(() => {
+    ctx.telegram.sendChatAction(chatId, 'typing').catch(() => {});
+  }, 4000);
+  try {
+    return await fn();
+  } finally {
+    clearInterval(interval);
+  }
+}
+
+function html(text) {
+  return { parse_mode: 'HTML', text };
+}
+
 function formatTasks(tasks) {
   if (!tasks.length) return 'No tasks found.';
-  return tasks.map(t => `• ${t.title} (${t.priority}) — ${t.due_date || 'no due date'} [${t.status}]`).join('\n');
+  return tasks.map(t => {
+    const priority = t.priority === 'high' ? '🔴' : t.priority === 'low' ? '🟢' : '🟡';
+    const due = t.due_date ? ` — <i>${esc(t.due_date)}</i>` : '';
+    return `${priority} <b>${esc(t.title)}</b>${due} [${esc(t.status)}]`;
+  }).join('\n');
 }
 
 function formatNotes(notesList) {
   if (!notesList.length) return 'No notes found.';
-  return notesList.slice(0, 10).map(n => `📝 ${n.title || '(untitled)'}: ${n.content.slice(0, 80)}${n.content.length > 80 ? '…' : ''}`).join('\n');
+  return notesList.slice(0, 10).map(n => {
+    const title = n.title ? `<b>${esc(n.title)}</b>` : '<i>(untitled)</i>';
+    const preview = esc(n.content.slice(0, 100)) + (n.content.length > 100 ? '…' : '');
+    return `📝 ${title}\n${preview}`;
+  }).join('\n\n');
 }
 
 function formatExpenses(expList) {
   if (!expList.length) return 'No expenses found.';
-  return expList.slice(0, 10).map(e => `• ${e.date} ${e.category || ''}: ${e.currency} ${e.amount}${e.description ? ' — ' + e.description : ''}`).join('\n');
+  return expList.slice(0, 10).map(e => {
+    const desc = e.description ? ` — ${esc(e.description)}` : '';
+    const cat = e.category ? esc(e.category) : 'uncategorized';
+    return `• <b>${esc(e.currency)} ${e.amount}</b> · ${cat}${desc} <i>(${esc(e.date)})</i>`;
+  }).join('\n');
 }
 
 function formatResult(result) {
   if (!result) return '';
-  if (result.error) return `\n⚠️ ${result.error}`;
+  if (result.error) return `\n\n⚠️ <i>${esc(result.error)}</i>`;
+
   if (Array.isArray(result)) {
-    if (!result.length) return '\n(no results)';
-    return '\n' + result.map(r => JSON.stringify(r)).join('\n');
+    if (!result.length) return '\n\n<i>No results found.</i>';
+    return '\n\n' + result.map(r => {
+      const lines = Object.entries(r)
+        .filter(([k]) => !['encrypted_value'].includes(k))
+        .map(([k, v]) => `  <b>${esc(k)}:</b> ${esc(v)}`);
+      return lines.join('\n');
+    }).join('\n\n');
   }
-  if (result.ok) return '\n✅ Done.';
-  return '\n' + JSON.stringify(result, null, 2);
+
+  if (result.ok) return '';
+
+  // Single object result (e.g. vault.get)
+  const lines = Object.entries(result)
+    .filter(([k]) => !['encrypted_value'].includes(k))
+    .map(([k, v]) => `<b>${esc(k)}:</b> <code>${esc(v)}</code>`);
+  return '\n\n' + lines.join('\n');
 }
+
+const START_MESSAGE = `👋 <b>Your personal bot is ready!</b>
+
+Here's what I can do — just type naturally:
+
+🔐 <b>Vault</b> — save &amp; retrieve passwords, cards, secrets
+📝 <b>Notes</b> — create, search, pin personal notes
+✅ <b>Planner</b> — tasks with due dates &amp; priorities
+💰 <b>Finance</b> — log expenses &amp; monthly summaries
+📁 <b>Files</b> — upload &amp; search your files
+💻 <b>Snippets</b> — save code by language &amp; tag
+👥 <b>Contacts</b> — store people with email &amp; phone
+⏰ <b>Reminders</b> — recurring Telegram reminders via cron
+
+<b>Commands:</b>
+/today — today's tasks
+/notes — recent notes
+/expenses — recent expenses
+/clear — reset conversation
+/help — show this message`;
 
 // Auth guard
 bot.use((ctx, next) => {
@@ -58,30 +127,15 @@ bot.use((ctx, next) => {
   return next();
 });
 
-bot.command('start', ctx => ctx.reply('Your personal bot is ready. Send me anything.'));
-
-bot.command('help', ctx => ctx.reply(
-  'What I can do:\n\n' +
-  '🔐 Save passwords, cards, secrets (vault)\n' +
-  '📝 Create and search notes\n' +
-  '✅ Manage tasks with due dates & priorities\n' +
-  '💰 Log and summarize expenses\n' +
-  '📁 Store and search files\n' +
-  '💻 Save code snippets\n' +
-  '👥 Manage contacts\n' +
-  '⏰ Schedule recurring reminders\n\n' +
-  'Commands:\n' +
-  '/today — today\'s tasks\n' +
-  '/notes — recent notes\n' +
-  '/expenses — recent expenses\n' +
-  '/clear — clear conversation history\n\n' +
-  'Just type naturally to save or retrieve anything!'
-));
+bot.command('start', ctx => ctx.replyWithHTML(START_MESSAGE));
+bot.command('help', ctx => ctx.replyWithHTML(START_MESSAGE));
 
 bot.command('today', async ctx => {
   try {
+    await ctx.telegram.sendChatAction(ctx.chat.id, 'typing');
     const tasks = planner.today();
-    await ctx.reply("Today's tasks:\n" + formatTasks(Array.isArray(tasks) ? tasks : []));
+    const list = Array.isArray(tasks) ? tasks : [];
+    await ctx.replyWithHTML(`<b>Today's Tasks</b>\n\n${formatTasks(list)}`);
   } catch {
     await ctx.reply('Something went wrong, try again.');
   }
@@ -89,8 +143,10 @@ bot.command('today', async ctx => {
 
 bot.command('notes', async ctx => {
   try {
+    await ctx.telegram.sendChatAction(ctx.chat.id, 'typing');
     const notesList = notes.list();
-    await ctx.reply(formatNotes(Array.isArray(notesList) ? notesList : []));
+    const list = Array.isArray(notesList) ? notesList : [];
+    await ctx.replyWithHTML(`<b>Recent Notes</b>\n\n${formatNotes(list)}`);
   } catch {
     await ctx.reply('Something went wrong, try again.');
   }
@@ -98,8 +154,10 @@ bot.command('notes', async ctx => {
 
 bot.command('expenses', async ctx => {
   try {
+    await ctx.telegram.sendChatAction(ctx.chat.id, 'typing');
     const expList = finance.list();
-    await ctx.reply(formatExpenses(Array.isArray(expList) ? expList : []));
+    const list = Array.isArray(expList) ? expList : [];
+    await ctx.replyWithHTML(`<b>Recent Expenses</b>\n\n${formatExpenses(list)}`);
   } catch {
     await ctx.reply('Something went wrong, try again.');
   }
@@ -108,7 +166,7 @@ bot.command('expenses', async ctx => {
 bot.command('clear', async ctx => {
   try {
     clearHistory(String(ctx.from.id));
-    await ctx.reply('Conversation cleared.');
+    await ctx.replyWithHTML('🗑 <b>Conversation cleared.</b>');
   } catch {
     await ctx.reply('Something went wrong, try again.');
   }
@@ -118,10 +176,12 @@ bot.command('clear', async ctx => {
 bot.on('text', async ctx => {
   try {
     const userId = String(ctx.from.id);
-    const aiReply = await chat(userId, ctx.message.text);
-    const { text, result } = parseAndExecute(aiReply);
+    const { text, result } = await withTyping(ctx, async () => {
+      const aiReply = await chat(userId, ctx.message.text);
+      return parseAndExecute(aiReply);
+    });
     const resultText = formatResult(result);
-    await ctx.reply((text || aiReply) + resultText);
+    await ctx.replyWithHTML((text || '✅ Done.') + resultText);
   } catch (e) {
     await ctx.reply('Something went wrong, try again.');
   }
@@ -130,6 +190,7 @@ bot.on('text', async ctx => {
 // File/document uploads
 async function handleFile(ctx, fileId, originalName, mimeType) {
   try {
+    await ctx.telegram.sendChatAction(ctx.chat.id, 'upload_document');
     const link = await ctx.telegram.getFileLink(fileId);
     const storedName = `${Date.now()}-${originalName.replace(/\s/g, '_')}`;
     const dest = path.join('uploads', storedName);
@@ -142,7 +203,7 @@ async function handleFile(ctx, fileId, originalName, mimeType) {
     });
 
     files.record({ original_name: originalName, stored_name: storedName, mime_type: mimeType });
-    await ctx.reply(`File saved: ${originalName}`);
+    await ctx.replyWithHTML(`📁 <b>File saved:</b> <code>${esc(originalName)}</code>`);
   } catch {
     await ctx.reply('Something went wrong saving the file.');
   }
